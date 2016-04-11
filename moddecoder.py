@@ -44,33 +44,27 @@ class Mod:
         self.pattern_sequences = [None]*128
         for i in range(0, 31):
             self.sample[i] = Mod.Sample()
+        self.sample_count = 31
         
 def open_mod( filename ):
     def get_sample_headers( mod, f ):
-        for i in range( 0, 31): #31, not 32
+        for i in range( 0, mod.sample_count):
             # 30 bytes all together for each sample header
-            sample_struct = struct.unpack("22sHbcHH",f.read(30))
+            sample_struct = struct.unpack("22s2sbcHH",f.read(30))
             mod.sample[i].name = sample_struct[0].decode("utf-8")
-            mod.sample[i].size = sample_struct[1]
-            print(mod.sample[i].size)
+            mod.sample[i].size = int.from_bytes(sample_struct[1], byteorder="big")*2
             mod.sample[i].finetune = (sample_struct[2] if sample_struct[2] < 8 else sample_struct[2] - 16)
             mod.sample[i].volume = ord(sample_struct[3])
             mod.sample[i].repeat_point = sample_struct[4]
             mod.sample[i].repeat_len = sample_struct[5]
 
     def get_pattern_headers( mod, f ):
-        header_struct = struct.unpack("130c4s",f.read(134))
+        header_struct = struct.unpack("130c4x",f.read(134)) #already read last 4
         mod.song_length = ord(header_struct[0])
         mod.pattern = []
         mod.restart_byte = ord(header_struct[1])
         for i in range( 0, 128):
             mod.pattern_sequences[i] = ord(header_struct[2+i])
-        try:
-            mod.signature = header_struct[130].decode("utf-8")
-            interpret_signature( mod, f)
-        except UnicodeDecodeError: #Pattern data started already
-            #TODO: test for 15 sample MOD
-            f.seek(-4,1)
             
     def get_patterns( mod, f):
         for p in range(0, mod.song_length):
@@ -84,13 +78,22 @@ def open_mod( filename ):
                     mod.pattern[p].channel[c].tick[t].sample=thex[0:1]+thex[4:5]
                     mod.pattern[p].channel[c].tick[t].effect=thex[5:8]
     def get_samples( mod, f):
-        for i in range(0, 31): #correct as far as i know?
+        for i in range(0, mod.sample_count):
             if mod.sample[i].size > 0:
                 mod.sample[i].data = f.read(mod.sample[i].size)
 
-    def interpret_signature( mod, f ):
-        if mod.signature == "M.K." or mod.signature == "M!K!" or mod.signature == "M&K!": #most common
+    def read_signature( mod, f ):
+        f.seek(1080)#where the M.K. initials are
+        siggy = f.read(4)
+        try:
+            mod.signature = siggy.decode("utf-8")
+        except UnicodeDecodeError: #if gibberish, then it's a 15 sample MOD
+            mod.sample_count = 15
+            mod.sample = mod.sample[:15]
+            f.seek(0,0)
             return
+        if mod.signature == "M.K." or mod.signature == "M!K!" or mod.signature == "M&K!": #most common
+            pass
         elif mod.signature[1:4] == "CHN": #4CHN - 9CHN channels
             mod.channel_count = int(mod.signature[0:1])
         elif mod.signature[2:4] == "CH" or mod.signature[2:4] == "CN":
@@ -101,17 +104,18 @@ def open_mod( filename ):
             mod.channel_count = int(mod.signature[3:4])
         elif mod.signature == "CD81" or mod.signature == "OKTA" or mod.signature == "OCTA":
             mod.channel_count = 8
-        elif re.search("[a-z][A-Z]",mod.signature):
-                return
-        #TODO: test for 15 sample MOD
-        f.seek(-4,1)
-
-    def interpret_note( note ):
-        pass
+        elif re.search("[a-z][A-Z]",mod.signature): #does it have any letters?
+            pass
+        else:
+            mod.sample_count = 15
+            mod.sample = mod.sample[:15]
+        f.seek(0,0)
 
     with open( filename, "rb", 16 ) as f:
         mod = Mod()
         mod.filename = filename
+        #We check these bytes at the beginning to see if it's a 15 sample MOD
+        read_signature( mod, f)
         #20 bytes for title padded with null bytes b2a_uu adds a newline...
         mod.title = struct.unpack("20s",f.read(20))[0].decode("utf-8")
         get_sample_headers( mod, f)
@@ -126,14 +130,13 @@ def open_mod( filename ):
 def print_sample_header( sample ):
     print("Sample name: {}".format(sample.name))
     print("Size       : {}".format(sample.size))
-    print("Data actual: {}".format(sys.getsizeof(sample.data)))
     print("Finetune   : {}".format(sample.finetune))
     print("Volume     : {}".format(sample.volume))
     print("Repeat pt. : {}".format(sample.repeat_point))
     print("Repeat len.: {}".format(sample.repeat_len))
     
 def print_sample_headers( mod ):
-    for i in range(0, 31):
+    for i in range(0, mod.sample_count):
          print("Sample {}".format(i))
          print_sample_header( mod.sample[i])
     
@@ -150,8 +153,38 @@ def hex2str( hex ):
     return bin(ord("\'")).split('b')[1]
 
 def print_comments( mod ):
-    for i in range(0, 31):
+    for i in range(0, mod.sample_count):
         print(mod.sample[i].name)
+
+def printable_note( note_in_hex ):
+    decoded = note_in_hex.decode("utf-8")
+    num = int( decoded, 16 )
+    if num == 0:
+        return "---"
+    tone_list = [1712, 1616, 1525, 1440, 1357, 1281, 1209,1141,1077,1017, 961, 907,856, 808, 762, 720, 678, 640, 604, 570, 538, 508, 480, 453,428, 404, 381, 360, 339, 320, 302, 285, 269, 254, 240, 226,214, 202, 190, 180, 170, 160, 151, 143, 135, 127, 120, 113,1712,1616,1525,1440,1357,1281,1209,1141,1077,1017, 961, 907,107, 101,  95,  90,  85,  80,  76,  71,  67,  64,  60,  57]
+    note_list = ["C ", "C#", "D ", "D#", "E ", "F ", "F#", "G ", "G#", "A ", "A#", "B "]
+    for i in range(0, len(tone_list)):
+        if num == tone_list[i]:
+            if i > 12:
+                octave_note = divmod(i, 12)
+            else:
+                octave_note = [0, 12-i]
+            return "{}{}".format( note_list[octave_note[1]], octave_note[0]+3)
+    #Manually tuned. No note
+    return decoded
+
+def printable_sample( sample_in_hex ):
+    sample_num = sample_in_hex.decode("utf-8")
+    num = int( sample_num, 16 )
+    if num == 0:
+        return "--"
+    return "{}".format(sample_num)
+
+def printable_effect( effect ):
+    decoded = effect.decode("utf-8").upper()
+    if decoded == "000":
+        return "---"
+    return decoded
 
 #requires tabulate
 def print_pattern( mod, no ):
@@ -161,9 +194,9 @@ def print_pattern( mod, no ):
         table[t] = [None]*mod.channel_count
         for c in range(0, mod.channel_count):
             data = "{} {} {} ".format(
-                mod.pattern[no].channel[c].tick[t].note.decode("utf-8"),
-                mod.pattern[no].channel[c].tick[t].sample.decode("utf-8"),
-                mod.pattern[no].channel[c].tick[t].effect.decode("utf-8"))
+                printable_note(mod.pattern[no].channel[c].tick[t].note),
+                printable_sample(mod.pattern[no].channel[c].tick[t].sample),
+                printable_effect(mod.pattern[no].channel[c].tick[t].effect))
             table[t][c] = data
     for c in range(0, mod.channel_count ):
         channel_header.append( "Channel {}".format(c))
