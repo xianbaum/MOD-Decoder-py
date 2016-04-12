@@ -1,11 +1,18 @@
-import sys
 import binascii
 import struct
 import re
 from base64 import b16encode
+import time
 
+#for print_pattern
 try:
     from tabulate import tabulate
+except ImportError:
+    pass
+
+#for alsaplay
+try:
+    import alsaaudio
 except ImportError:
     pass
 
@@ -16,7 +23,7 @@ class Mod:
             self.size = 0
             self.finetune = 0
             self.volume = 0
-            self.repeat_point = 0
+            self.repeat_pos = 0
             self.repeat_len = 0
             self.data = None
     class Pattern:
@@ -39,13 +46,67 @@ class Mod:
         self.restart_byte = 127
         self.signature = None
         self.sample = [None]*31
-        self.channel_count = 4 #Not sure how to find channel count
+        self.channel_count = 4
         self.pattern = []
         self.pattern_sequences = [None]*128
         for i in range(0, 31):
             self.sample[i] = Mod.Sample()
         self.sample_count = 31
-        
+
+class Player:
+    class Channel:
+        def __init__(self):
+            self.sample = 0
+            self.volume = 64
+            self.effect = 0
+            self.sample_pos = 0
+            self.last_time = time.time()
+        def read_tick( self, tick ):
+            num = int( tick.note.decode("utf-8"), 16 )
+            if tick.note is not 0:
+                self.note = num
+                self.sample_pos = 0
+            if tick.sample is not 0 and tick.sample is not self.sample:
+                self.instrument = tick.sample
+                self.sample_pos = 0
+            if tick.effect is not 0 and tick.effect is not self.effect:
+                self.effect = tick.effect
+
+    def sound_data_from_channel( self, channel_num, mod ):
+        chan = self.channel[channel_num]
+        sample = mod.sample[ chan.sample ]
+        if mod.sample[ chan.sample ].data:
+            temp_last_time = chan.last_time
+            chan.last_time = time.time()
+            elapsed_time = chan.last_time - temp_last_time
+            bytes_amount = round(self.clock/chan.note*elapsed_time)
+            if sample.repeat_pos is not 0 and sample.repeat_len is not 256 and  chan.sample_pos+bytes_amount > sample.repeat_pos + sample.repeat_len:
+                tmp_bytes = sample.repeat_pos+ sample.repeat_len - chan.pos + bytes_amount
+                return_data = sample.data[ chan.sample_pos : sample.repeat_pos + sample.repeat_len] + sample.data[ sample.repeat_pos : sample.repeat_pos + tmp_bytes ]
+                chan.sample_pos = sample.repeat_pos + tmp_bytes
+                return return_data
+            elif chan.sample_pos > sample.size:
+                bytes_amount = sample.size -chan.sample_pos
+                return_data = sample.data[ chan.sample_pos : chan.sample_pos + bytes_amount]
+                sample_pos = sample.size
+                return return_data
+            return_data = sample.data[ chan.sample_pos : chan.sample_pos + bytes_amount ]
+            chan.sample_pos += bytes_amount
+            return return_data
+        return b'\x00'
+
+    def __init__(self, channels, clock_rate = 7159090.5): #7093789.2 for PAL
+        self.clock = clock_rate
+        self.channel_count = channels
+        self.channel = [None]*channels
+        for i in range(0, channels):
+            self.channel[i] = Player.Channel()
+        self.pattern_num = 0
+        self.sample_pos = 0
+
+
+
+
 def open_mod( filename ):
     def get_sample_headers( mod, f ):
         for i in range( 0, mod.sample_count):
@@ -55,7 +116,7 @@ def open_mod( filename ):
             mod.sample[i].size = int.from_bytes(sample_struct[1], byteorder="big")*2
             mod.sample[i].finetune = (sample_struct[2] if sample_struct[2] < 8 else sample_struct[2] - 16)
             mod.sample[i].volume = ord(sample_struct[3])
-            mod.sample[i].repeat_point = sample_struct[4]
+            mod.sample[i].repeat_pos = sample_struct[4]
             mod.sample[i].repeat_len = sample_struct[5]
 
     def get_pattern_headers( mod, f ):
@@ -132,8 +193,8 @@ def print_sample_header( sample ):
     print("Size       : {}".format(sample.size))
     print("Finetune   : {}".format(sample.finetune))
     print("Volume     : {}".format(sample.volume))
-    print("Repeat pt. : {}".format(sample.repeat_point))
-    print("Repeat len.: {}".format(sample.repeat_len))
+    print("Repeat pos : {}".format(sample.repeat_pos))
+    print("Repeat len : {}".format(sample.repeat_len))
     
 def print_sample_headers( mod ):
     for i in range(0, mod.sample_count):
@@ -201,3 +262,17 @@ def print_pattern( mod, no ):
     for c in range(0, mod.channel_count ):
         channel_header.append( "Channel {}".format(c))
     print (tabulate(table, channel_header, "fancy_grid" ))
+
+#Requires alsaaudio
+def alsaplay( mod ):
+    player = Player( mod.channel_count )
+    player.channel[0].read_tick(mod.pattern[0].channel[0].tick[0])
+    out = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK)
+    out.setchannels(1)
+    out.setrate(8000)
+    out.setformat(alsaaudio.PCM_FORMAT_S16_LE)
+    while True:
+        j = player.sound_data_from_channel( 0, mod )
+        out.setperiodsize( int(mod.pattern[0].channel[0].tick[0].note.decode("utf-8"), 16))
+        print(j)
+        out.write(j)
