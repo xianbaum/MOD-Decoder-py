@@ -22,7 +22,7 @@ Use the
 
 ```python
 modobject = open_mod( pathtofile.mod ) 
-``
+```
 
 function to open a file. It returns an interpreted object with the header data, the sample data and pattern data. Please refer to for all of the members inside of the MOD class for details.
 
