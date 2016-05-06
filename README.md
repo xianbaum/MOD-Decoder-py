@@ -1,4 +1,4 @@
-#pymodinterpreter
+#pymodtracker
 
 Opens and interprets an MOD file.
 
